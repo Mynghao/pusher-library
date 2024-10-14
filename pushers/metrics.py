@@ -47,7 +47,7 @@ class Metric:
             contravariant coordinate x^i
         """
         assert len(x.shape) == 2
-        #assert x.shape[1:] == (2,) or x.shape[1:] == (3,)
+        # assert x.shape[1:] == (2,) or x.shape[1:] == (3,)
         assert x.shape[1:] == (2,)
 
     @staticmethod
@@ -65,7 +65,7 @@ class Metric:
         np.array (n x 3 x 3 x 3)
             Levi-Civita psuedotensor
         """
-        return - np.array(
+        return -np.array(
             [
                 [
                     [np.zeros(n), np.zeros(n), np.zeros(n)],
@@ -261,15 +261,15 @@ class Metric:
                     [np.zeros(n), np.zeros(n), np.sqrt(h_pp)],
                 ]
             ).T
-        
-#         try:
-#             print(ei_ih, ei_ih.shape)
-            
-#         except:
-#             print(eih_i, eih_i.shape)
-            
-#         print(v, v.shape)
-        
+
+        #         try:
+        #             print(ei_ih, ei_ih.shape)
+
+        #         except:
+        #             print(eih_i, eih_i.shape)
+
+        #         print(v, v.shape)
+
         if frm == Idx.D and to == Idx.T:
             return np.einsum("nji,nj->ni", ei_ih, v)
         elif frm == Idx.T and to == Idx.D:
@@ -277,7 +277,7 @@ class Metric:
         elif frm == Idx.U and to == Idx.T:
             return np.einsum("nji,nj->ni", eih_i, v)
         elif frm == Idx.T and to == Idx.U:
-            #print(ei_ih, v)
+            # print(ei_ih, v)
             return np.einsum("nij,nj->ni", ei_ih, v)
         elif frm == Idx.D and to == Idx.U:
             return np.einsum("nij,nj->ni", self.hij(x), v)
