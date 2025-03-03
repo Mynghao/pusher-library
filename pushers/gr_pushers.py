@@ -1,6 +1,6 @@
 import numpy as np
 from typing import Dict, Tuple, Callable
-from metrics import Metric, Idx
+from pushers.metrics import Metric, Idx
 
 class Drag:
     """
@@ -229,13 +229,36 @@ class Drag:
             return self.sync_update_u(u, u_prepush, dt, **args)
         else:
             return self.had_update_u(u, u_prepush, dt, **args)
-            
-class grBoris:
-    def __init__(self): ...
 
-    def error_x(self, metric, q1, q2, pos):
+class grBoris:
+    """
+    Base class for the general relativistic Boris pusher.
+
+    Methods
+    -------
+    error_x(metric, q1, q2, pos)
+        Calculates the error in the position update.
+    error_u(metric, q1, q2, pos)
+        Calculates the error in the 4-velocity update.
+    update_u(metric, x, u, E, B, dt)
+        Updates the 4-velocity of the particle due to EM forces.
+    update_u_i(metric, x, u, dt)
+        Updates the covariant 4-velocity of the particle.
+    update_xi(metric, x, u, dt)
+        Updates the contravariant position of the particle.
+    """
+    
+    def __init__(self): ...
+    
+    @staticmethod
+    def error_x(
+        metric: Metric, 
+        q1: np.ndarray[float], 
+        q2: np.ndarray[float], 
+        pos: np.ndarray[float]
+    ) -> float:
         x2d = pos[:, :-1]
-        dq = q2 - q1
+        dq = np.abs(q2 - q1)
         return (
             np.sqrt(
                 np.einsum("ni,ni->n", np.einsum("nij,ni->nj", metric.h_ij(x2d), dq), dq)
@@ -245,9 +268,15 @@ class grBoris:
             )[0]
         )
 
-    def error_u(self, metric, q1, q2, pos):
+    @staticmethod
+    def error_u(
+        metric: Metric, 
+        q1: np.ndarray[float], 
+        q2: np.ndarray[float], 
+        pos: np.ndarray[float]
+    ) -> float:
         x2d = pos[:, :-1]
-        dq = q2 - q1
+        dq = np.abs(q2 - q1)
         return (
             np.sqrt(
                 np.einsum("ni,ni->n", np.einsum("nij,ni->nj", metric.hij(x2d), dq), dq)
@@ -257,34 +286,80 @@ class grBoris:
             )[0]
         )
 
-    def update_u(self, x, u, E, B, dt):
+    def update_u(
+        self,
+        u: np.ndarray[float], 
+        E: np.ndarray[float], 
+        B: np.ndarray[float], 
+        dt: float,
+    ) -> np.ndarray[float]:
+        """
+        Parameters
+        ----------
+        u : np.ndarray[float]
+            Particle velocity at time n in tetrad basis
+        E : np.ndarray[float]
+            Electric field at time n in tetrad basis
+        B : np.ndarray[float]
+            Magnetic field at time n in tetrad basis
+        dt : float
+            Timestep
+
+        Returns
+        -------
+        np.ndarray[float]
+            Updated particle 4-velocity due to EM fields
+        """
 
         k = 0.5 * dt
-
         u_neg = u + k * E
         t = k * B / np.sqrt(1 + (np.linalg.norm(u_neg)) ** 2)
         s = 2 * t / (1 + np.linalg.norm(t) ** 2)
         u_pos = u_neg + np.cross((u_neg + np.cross(u_neg, t)), s)
-
         return u_pos + k * E
 
-    def update_u_i(self, metric, x, u, dt):
+    def update_u_i(
+        self, 
+        metric: Metric, 
+        x: np.ndarray[float], 
+        u: np.ndarray[float], 
+        dt: float
+    ) -> Tuple[np.ndarray[float], np.ndarray[float], np.ndarray[float]]:
+        """
+        Update the covariant 4-velocity due to spacetime curvature
+        u_i^(n-1/2) -> u_i^(n+1/2)
+
+        Parameters
+        ----------
+        metric : Metric
+        x : np.ndarray[float]
+            Particle position at time n in tetrad basis
+        u : np.ndarray[float]
+            Particle 4-velocity at time n-1/2 in tetrad basis
+        dt : float
+            Timestep
+
+        Returns
+        -------
+        Tuple[np.ndarray[float], np.ndarray[float], np.ndarray[float]]
+            Updated particle 4-velocity, energy, and gamma
+        """
+
         u_new_1 = np.copy(u)
         u_new_2 = np.copy(u)
         x2d = x[:, :-1]
         err = 1
-
         while err > 10e-8:
             u_mid = 0.5 * (u + u_new_2)
+            gamma = metric.gamma(x2d, u_mid)
             gamma = metric.gamma(x2d, u_mid)
             first = np.einsum("n,ni->ni", -gamma, metric.d_i_alpha(x2d))
             second = np.einsum("nj,nij->ni", u_mid, metric.d_i_betaj(x2d))
             third = np.einsum("nj,nk,nijk->ni", u_mid, u_mid, metric.d_i_hjk(x2d))
             third = np.einsum("n,ni->ni", -metric.alpha(x2d) / (2 * gamma), third)
             u_new_2 = u + dt * (first + second + third)
-            err = self.error_u(metric, u_new_1, u_new_2, x)
+            err = grBoris.error_u(metric, u_new_1, u_new_2, x)
             u_new_1 = np.copy(u_new_2)
-
         return (
             u_new_2,
             -(
@@ -294,7 +369,32 @@ class grBoris:
             gamma,
         )
 
-    def update_xi(self, metric, x, u_i, dt):
+    def update_xi(
+        self, 
+        metric: Metric, 
+        x: np.ndarray[float], 
+        u_i: np.ndarray[float], 
+        dt: float
+    ) -> np.ndarray[float]:
+        """
+        Update the contravariant position of massive particles.
+        x^(n) -> x^(n+1)
+
+        Parameters
+        ----------
+        metric : Metric
+        x : np.ndarray[float]
+            Particle position at time n 
+        u_i : np.ndarray[float]
+            Particle 4-velocity at time n+1/2 
+        dt : float
+            Timestep
+
+        Returns
+        -------
+        np.ndarray[float]
+            Updated particle position
+        """
         x_new_1 = np.copy(x)
         x_new_2 = np.copy(x)
         x2d = x[:, :-1]
@@ -302,58 +402,45 @@ class grBoris:
         while err > 10e-8:
             xmid2d = 0.5 * (x2d + x_new_2[:, :-1])
             gamma = metric.gamma(xmid2d, u_i)
+            gamma = metric.gamma(xmid2d, u_i)
             first = np.einsum("nij,nj->ni", metric.hij(xmid2d), u_i)
             first = np.einsum("n,ni->ni", metric.alpha(xmid2d) / gamma, first)
             second = -metric.betai(xmid2d)
             x_new_2 = x + dt * (first + second)
-            err = self.error_x(metric, x_new_1, x_new_2, (x_new_1 + x_new_2) / 2)
+            err = grBoris.error_x(metric, x_new_1, x_new_2, (x_new_1 + x_new_2) / 2)
             x_new_1 = np.copy(x_new_2)
 
         return x_new_2
 
-    def push(self, metric, xold, x, u_i, E_phys, B_phys, dt):
-        assert x.shape == u_i.shape
-        assert len(x.shape) == 2
-        assert x.shape[1:] == (3,)
-        x2d = x[:, :-1]
-        xmid2d = 0.5 * (xold[:, :-1] + x[:, :-1])
-        n = x.shape[0]
-
-        Ei = metric.transform(E_phys(x), x2d, Idx.T, Idx.U)
-        Bi = metric.transform(B_phys(x), x2d, Idx.T, Idx.U)
-        E_i = metric.transform(Ei, x2d, Idx.U, Idx.D)
-        B_i = metric.transform(Bi, x2d, Idx.U, Idx.D)
-        B_norm = np.sqrt(np.einsum("ni,ni->n", Bi, B_i))
-        E_norm = np.sqrt(np.einsum("ni,ni->n", Ei, E_i))
-        # print(B_norm, E_norm)
-#         if B_norm[0] == 0 and E_norm[0] == 0:
-#             u_new, energy, gamma = self.update_u_i(metric, x, u_i, dt)
-#             uh_new = metric.transform(u_new, xmid2d, Idx.D, Idx.T)
-#             x_new, u = self.update_xi(metric, x, uh_new, dt)
-#             return x, x_new, u_new, energy, gamma
-
-        Eh = metric.transform(Ei, x2d, Idx.U, Idx.T)
-        Bh = metric.transform(Bi, x2d, Idx.U, Idx.T)
-        uh = metric.transform(u_i, x2d, Idx.D, Idx.T)
-
-        uh_1 = self.update_u(x, uh, Eh, Bh, dt / 2)
-        u_i_1 = metric.transform(uh_1, x2d, Idx.T, Idx.D)
-        u_i_2, energy, gamma = self.update_u_i(metric, x, u_i_1, dt)
-        uh_2 = metric.transform(u_i_2, x2d, Idx.D, Idx.T)
-        uh_2 = self.update_u(x, uh_2, Eh, Bh, dt / 2)
-        u_new = metric.transform(uh_2, x2d, Idx.T, Idx.D)
-        x_new = self.update_xi(metric, x, uh_2, dt)
-
-        return x, x_new, u_new, energy, gamma
-
-
 class grGCA:
+    """
+    Base class for the general relativistic GCA pusher.
+
+    Methods
+    -------
+    error_x(metric, q1, q2, pos)
+        Calculates the error in the position update.
+    error_u(metric, q1, q2, pos)
+        Calculates the error in the 4-velocity update.
+    update_up_ih(up_ih, Dpih, dt)
+        Updates the parallel 4-velocity due to electric field.
+    update_up(metric, x, up, vD_i, bi, dt)
+        Updates the parallel component of 4-velocity due to spacetime curvature.
+    update_xi(metric, x, up, D_phys, B_phys, dt)
+        Updates the contravariant position of massive particles.
+    """
 
     def __init__(self): ...
 
-    def error_x(self, metric, q1, q2, pos):
+    @staticmethod
+    def error_x(
+        metric: Metric, 
+        q1: np.ndarray[float], 
+        q2: np.ndarray[float], 
+        pos: np.ndarray[float]
+    ) -> float:
         x2d = pos[:, :-1]
-        dq = q2 - q1
+        dq = np.abs(q2 - q1)
         return (
             np.sqrt(
                 np.einsum("ni,ni->n", np.einsum("nij,ni->nj", metric.h_ij(x2d), dq), dq)
@@ -363,150 +450,103 @@ class grGCA:
             )[0]
         )
 
-    def update_u_i(self, metric, x, u_i, D_phys, B_phys, dt):
+    def update_up_ih(
+        self,
+        up_ih: np.ndarray[float],
+        Dpih: np.ndarray[float],
+        dt: float,
+    ) -> np.ndarray[float]:
         """
-        Update the covariant velocity of massive particles.
-        u_i^(n-1/2) -> u_i^(n+1/2)
+        Update the parallel 4-velocity due to electric field.
+
+        Parameters
+        ----------
+        up_ih : np.ndarray[float]
+            Parallel 4-velocity n tetrad basis
+        Dpih : np.ndarray[float]
+            Parallel electric field in tetrad basis
+        dt : float
+            Timestep
+
+        Returns
+        -------
+        np.ndarray[float]
+            Updated parallel 4-velocity in tetrad basis
+        """
+        q_ovr_m = 1
+        return up_ih + q_ovr_m * Dpih * dt
+
+    def update_up(
+        self,
+        metric: Metric,
+        x: np.ndarray[float],
+        up: np.ndarray[float],
+        vD_i: np.ndarray[float],
+        bi: np.ndarray[float],
+        dt: float,
+    ) -> np.ndarray[float]:
+        """
+        Update the parallel component of 4-velocity due to spacetime curvature.
 
         Parameters
         ----------
         metric : Metric
-        x : np.array (n x D)
-            Positions at time n
-        u_i : np.array (n x 3)
-            Covariant velocities at time n-1/2
-        D_phys : np.array (n x 3)
-            Electric field in tetrad basis at time n
-        B_phys : np.array (n x 3)
-            Magnetic field in tetrad basis at time n
+        x : np.ndarray[float]
+            Particle position at time n in tetrad basis
+        up : np.ndarray[float]
+            Parallel parallel 4-velocity component
+        vD_i : np.ndarray[float]
+            DxB drift covariant velocity
+        bi : np.ndarray[float]
+            Magnetic field unit vector in tetrad basis
         dt : float
             Timestep
-        q_ovr_m : float, optional
-            Charge-to-mass ratio (default is 1)
 
         Returns
         -------
-        tuple : (np.array (n x 3), np.array (n))
-            (u_i^(n+1/2), gamma)
+        np.ndarray[float]
+            Updated covariant 4-velocity
         """
-        n = x.shape[0]  # number of particles
+        
         x2d = x[:, :-1]
-        #xmid2d = 0.5 * (xold[:, :-1] + x[:, :-1])
-        # u_i^(n-1/2) -> u^i^(n-1/2)
-        ui = metric.transform(u_i, x2d, Idx.D, Idx.U)
-
-        # D^ih^(n) & B^ih^(n) -> D^i^(n) & B^i^(n)
-        Di = metric.transform(D_phys(x), x2d, Idx.T, Idx.U)
-        Bi = metric.transform(B_phys(x), x2d, Idx.T, Idx.U)
-
-        # D^i^(n) & B^i^(n) -> D_i^(n) & B_i^(n)
-        D_i = metric.transform(Di, x2d, Idx.U, Idx.D)
-        B_i = metric.transform(Bi, x2d, Idx.U, Idx.D)
-
-        # |B|^(n)
-        B_norm = np.sqrt(np.einsum("ni,ni->n", B_i, Bi))
-        # b^i^(n) & b_i^(n)
-        b_i = B_i / B_norm
-        bi = Bi / B_norm
-
-        # u_i^(n-1/2) & D_i^(n) -> u||^i^(n-1/2) & D||^i^(n) aligned with b^i^(n)
-        u_ip = np.einsum("nj,nj,ni->ni", u_i, bi, b_i)
-        Dip = np.einsum("nj,nj,ni->ni", Di, b_i, bi)
-
-        # Levi-Civita psuedotensor
-        ep_ijk = Metric.eLC_ijk(n)
-
-        # (D x B)_i^(n) drift velocity
-        vE_i = (
-            np.sqrt(np.abs(np.linalg.det(metric.h_ij(x2d))))
-            * np.einsum("nijk,nj,nk->ni", ep_ijk, Di, Bi)
-            / B_norm ** 2
-        )
-
-        # Setting mu = 0
-        u_iper = 0
-
-        # u||^i^(n-1/2) & D||^i^(n) -> u||^ih^(n-1/2) & D||^ih^(n)
-        u_ihp = metric.transform(u_ip, x2d, Idx.D, Idx.T)
-        Dihp = metric.transform(Dip, x2d, Idx.U, Idx.T)
-
-        # u||^ih^(n-1/2) -> u||^ih^(*) (electric push)
-        q_ovr_m = 1
-        u_ihp_2 = u_ihp + q_ovr_m * Dihp * dt / 2
-
-        # u||^ih^(*) -> u||^i^(*)
-        u_ip_2 = metric.transform(u_ihp_2, x2d, Idx.T, Idx.D)
-
-        # u||^i^(*) -> u||^(*) (computing the projection)
-        up = np.einsum("ni,ni->n", u_ip_2, bi)
         up_new_1 = np.copy(up)
         up_new_2 = np.copy(up)
-
+        uper_i = 0
         err = 1
-
-        # u^(n-1/2) -> u^(n+1/2)
-        # all right-hand side components defined at timestep n
         while err > 10e-8:
-            # evaluate midpoint scalar value
-            # u||^(mid) = (u||^(*) + u||^(**)) / 2
             up_mid = 0.5 * (up + up_new_2)
-
-            # kappa = 1 / sqrt(1 - |vE|^2) @ n
             kappa = 1 / np.sqrt(
-                1 - np.einsum("nij,ni,nj->n", metric.hij(x2d), vE_i, vE_i)
+                1 - np.einsum("nij,ni,nj->n", metric.hij(x2d), vD_i, vD_i)
             )
-            gamma = kappa * np.sqrt(1 + up_mid**2)  # assuming mu = 0
-
-            # midpoint full velocity vector (u_iper = perpenducular component = 0)
-            # u_i^(mid) = u||^(mid) * b_i + gamma * vE_i + (u_iper = 0)
+            gamma = kappa * np.sqrt(1 + up_mid**2) #assuming mu = 0
             u_i_mid = (
-                np.einsum("n,ni->ni", up_mid, b_i)
-                + np.einsum("ni,n->ni", vE_i, gamma)
-                + u_iper
+                np.einsum("n,ni->ni", up_mid, metric.transform(bi, x2d, Idx.U, Idx.D))
+                + np.einsum("ni,n->ni", vD_i, gamma)
+                + uper_i
             )
 
-            # implicit push equation components
             first = -np.einsum("n,ni->ni", gamma, metric.d_i_alpha(x2d))
             second = np.einsum("nj,nij->ni", u_i_mid, metric.d_i_betaj(x2d))
             third = np.einsum("nj,nk,nijk->ni", u_i_mid, u_i_mid, metric.d_i_hjk(x2d))
+            second = np.einsum("nj,nij->ni", u_i_mid, metric.d_i_betaj(x2d))
+            third = np.einsum("nj,nk,nijk->ni", u_i_mid, u_i_mid, metric.d_i_hjk(x2d))
             third = np.einsum("n,ni->ni", -metric.alpha(x2d) / (2 * gamma), third)
-
-            # u||^(**) = u||^(*) + dt * (first + second + third)
             up_new_2 = up + dt * np.einsum("ni,ni->n", (first + second + third), bi)
 
-            # error calculation
             err = 2 * (up_new_2 - up_new_1) / (up_new_2 + up_new_1)
             up_new_1 = np.copy(up_new_2)
+        
+        return up_new_2
 
-        # reconstruct new velocity
-        #         u_new = (
-        #             np.einsum("n,ni->ni", ups_new_2, b_i)
-        #             + np.einsum("n,ni->ni", gamma, vE_i)
-        #             + u_iper
-        #         )
-
-        #         u2h = metric.transform(u2_i, xmid2d, Idx.U, Idx.T)
-        #         uh_new = uihp + q_ovr_m * Dihp * dt / 2
-        up_ih = metric.transform(
-            np.einsum("n,ni->ni", up_new_2, b_i), x2d, Idx.D, Idx.T
-        )
-        up_ih_new = up_ih + q_ovr_m * Dihp * dt / 2
-        up_i_new = metric.transform(up_ih_new, x2d, Idx.T, Idx.D)
-        up_new = np.einsum('ni,ni->n', up_i_new, bi)
-        u_new = (
-                    up_i_new
-                    + np.einsum("n,ni->ni", gamma, vE_i)
-                    + u_iper
-                )
-
-        return (
-            u_new,
-            up_new,
-            kappa,
-            gamma,
-        )
-
-    def update_xi(self, metric, x, u_i, ups, D_phys, B_phys, dt):
+    def update_xi(
+        self,
+        metric: Metric,
+        x: np.ndarray[float],
+        up: np.ndarray[float],
+        D_phys,
+        B_phys,
+        dt: float,
+    ) -> np.ndarray[float]:
         """
         Update the contravariant position of massive particles.
         x^(n) -> x^(n+1)
@@ -514,117 +554,255 @@ class grGCA:
         Parameters
         ----------
         metric : Metric
-        x : np.array (n x D)
+        x : np.ndarray[float] (n x 3)
             Positions at time n
-        u_i : np.array (n x 3)
-            Covariant velocities at time n+1/2
-        D_phys : np.array (n x 3)
-            Electric field in tetrad basis at time n
-        B_phys : np.array (n x 3)
-            Magnetic field in tetrad basis at time n
+        up : np.ndarray[float] (n)
+            Parallel 4-velocity component
+        D_phys : function
+            Electric field function in tetrad basis at time n
+        B_phys : function
+            Magnetic field function in tetrad basis at time n
         dt : float
             Timestep
 
         Returns
         -------
-        np.array (n x D)
-            x^(n+1)
+        np.ndarray[float] (n x 3)
+            Updated particle position
         """
-        n = x.shape[0]  # number of particles
-
         x_new_1 = np.copy(x)
         x_new_2 = np.copy(x)
-        err = 1
-
-        # Levi-Civita psuedotensor
+        n = x.shape[0]
         ep_ijk = Metric.eLC_ijk(n)
-
-        #         uh = metric.transform(u_i, xmid2d, Idx.D, Idx.T)
-        #         uh_new = uihp + q_ovr_m * Dihp * dt / 2
-                        
-        # x^i^(n) -> x^i^(n+1)
-        # all right-hand side components defined at timestp n+1/2
-        while err > 10 ** (-8):
-            # x^i^(mid) = (x^i^(n) + x^i^(*)) / 2
+        err = 1
+        while err > 10e-8:
             xmid = 0.5 * (x + x_new_2)
             xmid2d = xmid[:, :-1]
-
-            # Lorentz factor
-            gamma = metric.gamma(xmid2d, u_i)
-
-            # D^ih^(n) & B^ih^(n) -> E^i^(n) & B^i^(n)
-            Di = metric.transform(D_phys(xmid2d), xmid2d, Idx.T, Idx.U)
-            Bi = metric.transform(B_phys(xmid2d), xmid2d, Idx.T, Idx.U)
-            # D^i^(n) & B^i^(n) -> E_i^(n) & B_i^(n)
-            D_i = metric.transform(Di, xmid2d, Idx.U, Idx.D)
+            Di = metric.transform(D_phys(x), xmid2d, Idx.T, Idx.U)
+            Bi = metric.transform(B_phys(x), xmid2d, Idx.T, Idx.U)
             B_i = metric.transform(Bi, xmid2d, Idx.U, Idx.D)
-            # @TODO: THESE ARE FIELDS AT ^(n) not ^(n+1/2)
-
-            # u_i^(n+1/2) -> u^i^(n+1/2)
-            # ui = metric.transform(u_i, xmid2d, Idx.D, Idx.U)
-
-            # |B|^(n)
             B_norm = np.sqrt(np.einsum("ni,ni->n", B_i, Bi))
-            # b^i^(n) & b_i^(n)
-            b_i = B_i / B_norm
             bi = Bi / B_norm
-
-            # u_i^(n+1/2) & D_i^(n) -> u||^i^(n+1/2) & D||^i^(n) aligned with b^i^(n)
-            
-
-            # (D x B)_i^(n) drift velocity
-            vE_i = (
+            vD_i = (
                 np.sqrt(np.abs(np.linalg.det(metric.h_ij(xmid2d))))
                 * np.einsum("nijk,nj,nk->ni", ep_ijk, Di, Bi)
-                / B_norm**2
+                / B_norm ** 2
             )
-                            
-            # implicit push equation components
-            first = ups * bi / gamma + np.einsum("nij,nj->ni", metric.hij(xmid2d), vE_i)
+            kappa = 1 / np.sqrt(
+                1 - np.einsum("nij,ni,nj->n", metric.hij(xmid2d), vD_i, vD_i)
+            )
+            gamma = kappa * np.sqrt(1 + up ** 2)  # assuming mu = 0
+
+            first = up * bi / gamma + np.einsum("nij,nj->ni", metric.hij(xmid2d), vD_i)
             first = np.einsum("n,ni->ni", metric.alpha(xmid2d), first)
             second = -metric.betai(xmid2d)
-
-            # x^i^(*) = x^i^(n) + dt * (first + second)
             x_new_2 = x + dt * (first + second)
-
-            # error calculation
-            err = self.error_x(metric, x_new_1, x_new_2, 0.5 * (x_new_1 + x_new_2))
-            # x^i^(**) = x^i^(*)
+            err = grBoris.error_x(metric, x_new_1, x_new_2, 0.5 * (x_new_1 + x_new_2))
             x_new_1 = np.copy(x_new_2)
 
         return x_new_2
 
-    def push(self, metric, x, u_i, D_phys, B_phys, dt, q_ovr_m=1):
-        """
-        Parameters
-        ----------
-        metric : function
-        x : np.array (n x 3)
-            contravariant coordinates (at n)
-        u_i: np.array (n x 3)
-            covariant velocities (at n-1/2)
-        D_phys: np.array (n x 3)
-            electric field in tetrad basis (at n)
-        B_phys: np.array (n x 3)
-            magnetic field in tetrad basis (at n)
+def IntegrateTrajectory(
+    metric: Metric,
+    x0: np.ndarray[float],
+    u0: np.ndarray[float],
+    dt: float,
+    tmax: float,
+    D_func: Callable[[np.ndarray], np.ndarray] = lambda _: np.array([0, 0, 0]),
+    B_func: Callable[[np.ndarray], np.ndarray] = lambda _: np.array([0, 0, 0]),
+    drags: Dict[str, Dict[str, float | np.ndarray[float]]] = None,
+    pusher_type: str = "boris",
+    grgca_params: Dict[str, float] = {},
+    progressbar=lambda _: _,
+) -> Tuple[np.ndarray[float], np.ndarray[float]]:
+    """
+    Integrate the trajectory of a particle in a spacetime metric.
 
-        Returns
-        -------
-        x_new : np.array (n x 3)
-            updated contravariant coordinates over 1 timestep
-        u_new : np.array (n x 3)
-            updated covariant velocity over 1 timestep
-        energy : np.array (n)
-            total particle energy
-        gamma : np.array (n)
-            particle Lorentz factor
-        """
+    Parameters
+    ----------
+    metric : Metric
+        Metric of the spacetime.
+    x0 : np.ndarray[float]
+        Initial position of the particle @ n.
+    u0 : np.ndarray[float]
+        Initial 4-velocity of the particle.
+    dt : float
+        Timestep.
+    tmax : float
+        Maximum time to integrate the trajectory.
+    D_func : Callable[[np.ndarray], np.ndarray], optional
+        Function that returns the electric field at a given position.
+    B_func : Callable[[np.ndarray], np.ndarray], optional
+        Function that returns the magnetic field at a given position.
+    drags : Dict[str, Dict[str, float | np.ndarray[float]]], optional
+        Dictionary of drag parameters.
+    pusher_type : str, optional
+        Type of pusher to use. "boris" or "gca" or "hybrid".
+    grgca_params : Dict[str, float], optional
+        Parameters for the GCA pusher.
+    progressbar : Callable[[float], float], optional
+        Progress bar function.
 
-        assert x.shape == u_i.shape
-        assert len(x.shape) == 2
-        assert x.shape[1:] == (2,) or x.shape[1:] == (3,)
+    Returns
+    -------
+    Tuple[np.ndarray[float], np.ndarray[float]]
+        Trajectory and 4-velocity of the particle.
+    """
 
-        u_new, ups, kappa, gamma = self.update_u_i(metric, x, u_i, D_phys, B_phys, dt)
-        x_new = self.update_xi(metric, x, u_new, ups, D_phys, B_phys, dt)
+    nsteps = int(tmax / dt)
+    pusher_grboris = grBoris()
+    if pusher_type == "gca":
+        pusher_grgca = grGCA(**grgca_params)
+    if pusher_type == "hybrid":
+        E_ovr_B_max = grgca_params.pop("E_ovr_B_max", 0.9)
+        larmor_max = grgca_params.pop("larmor_max", 0.1)
+        pusher_grgca = grGCA(**grgca_params)
+        pusher = ["Boris"]
+    
+    pusher_drags = []
+    if drags is not None:
+        for drag, params in drags.items():
+            pusher_drags.append(Drag(drag, **params))
 
-        return x_new, u_new, kappa, gamma
+    xi, u_i = x0, u0
+    t = 0
+    times = [t]
+    xs = [xi]
+    us = [u_i]
+    n = x0.shape[0]
+    ep_ijk = Metric.eLC_ijk(n)
+    for it in progressbar(range(nsteps)):
+        D_phys, B_phys = D_func(xi), B_func(xi)
+        use_grgca = False
+        if pusher_type == "gca":
+            u_iper = 0 #sets mu = 0
+            use_grgca = True
+        if pusher_type == "hybrid":
+            u_iper = 0 #sets mu = 0
+            u_ih = metric.transform(u_i, xi[:, :-1], Idx.D, Idx.T)
+            rho = np.sum(np.cross(u_ih, B_phys) ** 2) ** 0.5 / np.dot(B_phys, B_phys)
+            use_grgca = (np.linalg.norm(D_phys) / E_ovr_B_max < np.linalg.norm(B_phys)) and (
+                rho < larmor_max
+            )
+        
+        if use_grgca:
+            x2d = xi[:, :-1]
+            Di = metric.transform(D_phys, xi[:, :-1], Idx.T, Idx.U)
+            Bi = metric.transform(B_phys, xi[:, :-1], Idx.T, Idx.U)
+            B_i = metric.transform(Bi, xi[:, :-1], Idx.U, Idx.D)
+            B_norm = np.sqrt(np.einsum("ni,ni->n", Bi, B_i))
+            bi = Bi / B_norm
+            b_i = B_i / B_norm
+            u_ih = metric.transform(u_i, xi[:, :-1], Idx.D, Idx.T)
+
+            up_i = np.einsum("nj,nj,ni->ni", u_i, bi, b_i)
+            Dpi = np.einsum("nj,nj,ni->ni", Di, b_i, bi)
+            up_ih = metric.transform(up_i, xi[:, :-1], Idx.D, Idx.T)
+            Dpih = metric.transform(Dpi, xi[:, :-1], Idx.U, Idx.T)
+            up_ih2 = pusher_grgca.update_up_ih(up_ih, Dpih, dt / 2)
+            up = np.einsum(
+                "ni,ni->n", metric.transform(up_ih2, xi[:, :-1], Idx.T, Idx.D), bi
+            )
+            vD_i = (
+                np.sqrt(np.abs(np.linalg.det(metric.h_ij(x2d))))
+                * np.einsum("nijk,nj,nk->ni", ep_ijk, Di, Bi)
+                / B_norm ** 2
+            )
+            
+            kappa = 1 / np.sqrt(
+                1 - np.einsum("nij,ni,nj->n", metric.hij(xi[:, :-1]), vD_i, vD_i)
+            )
+            gamma = kappa * np.sqrt(1 + up ** 2)
+            u_ih2 = (
+                metric.transform(up_ih2, xi[:, :-1], Idx.T, Idx.D)
+                + np.einsum("ni,n->ni", vD_i, gamma)
+                + u_iper
+            )
+        else:
+            x2d = xi[:, :-1]
+            u_ih = metric.transform(u_i, x2d, Idx.D, Idx.T)
+            Dh = D_phys
+            Bh = B_phys
+            u_ih2 = pusher_grboris.update_u(u_ih, Dh, Bh, dt / 2)
+        
+        if drags is not None:
+            for drag in pusher_drags:
+                args = {}
+                if drag.process == "sync":
+                    args["E"] = D_phys
+                    args["B"] = B_phys
+                if use_grgca and drag.process == "sync":
+                    continue        
+                u_ih = drag.update_u(u_ih, u_ih2, dt, **args)
+        else:
+            u_ih = u_ih2
+            
+        if use_grgca:
+            up = pusher_grgca.update_up(metric, xi, up, vD_i, bi, dt)
+            up_i = np.einsum("n,ni->ni", up, b_i)
+            up_ih = metric.transform(up_i, x2d, Idx.D, Idx.T)
+            up_ih2 = pusher_grgca.update_up_ih(up_ih, Dpih, dt / 2)
+            up = np.einsum(
+                "ni,ni->n", metric.transform(u_ih, xi[:, :-1], Idx.T, Idx.D), bi
+            )
+            up2 = np.einsum(
+                "ni,ni->n", metric.transform(u_ih2, xi[:, :-1], Idx.T, Idx.D), bi
+            )
+            gamma = kappa * np.sqrt(1 + up ** 2)
+            gamma2 = kappa * np.sqrt(1 + up2 ** 2)
+            u_i = (
+                metric.transform(up_ih, xi[:, :-1], Idx.T, Idx.D)
+                + np.einsum("ni,n->ni", vD_i, gamma)
+                + u_iper
+            )
+            u_i2 = (
+                metric.transform(up_ih2, xi[:, :-1], Idx.T, Idx.D)
+                + np.einsum("ni,n->ni", vD_i, gamma2)
+                + u_iper
+            )
+            u_ih = metric.transform(u_i, x2d, Idx.D, Idx.T)
+            u_ih2 = metric.transform(u_i2, x2d, Idx.D, Idx.T)
+
+        else:
+            u_i = metric.transform(u_ih, x2d, Idx.T, Idx.D)
+            u_i, energy, gamma = pusher_grboris.update_u_i(metric, xi, u_i, dt)
+            u_ih = metric.transform(u_i, x2d, Idx.D, Idx.T)
+            u_ih2 = pusher_grboris.update_u(u_ih, Dh, Bh, dt / 2)
+        
+        if drags is not None:
+            for drag in pusher_drags:
+                if use_grgca and drag.process == "sync":
+                    continue        
+                u_ih = drag.update_u(u_ih, u_ih2, dt, **args)
+        else:
+            u_ih = u_ih2
+        
+        if use_grgca:
+            u_i = metric.transform(u_ih, x2d, Idx.T, Idx.D)
+            up = np.einsum("ni,ni->n", u_i, bi)
+            xi = pusher_grgca.update_xi(metric, xi, up, D_func, B_func, dt)
+        else:
+            u_i = metric.transform(u_ih, x2d, Idx.T, Idx.D)
+            xi = pusher_grboris.update_xi(metric, xi, u_i, dt)
+
+        t += dt
+        times.append(t)
+        xs.append(xi)
+        us.append(u_i)
+        if pusher_type == "hybrid":
+            pusher.append("GCA" if use_grgca else "Boris")
+    if pusher_type == "hybrid":
+        return (
+            np.array(times),
+            np.array(xs),
+            np.array(us),
+            np.array(pusher),
+        )
+    else:
+        return (
+            np.array(times),
+            np.array(xs),
+            np.array(us),
+        )
+    
+            

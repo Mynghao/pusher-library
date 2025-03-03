@@ -22,7 +22,7 @@ class Metric:
 
     Methods
     -------
-    gamma(x, u, phot)
+    gamma(x, u)
         Returns the Lorentz factor of the particle
     d_i_alpha(x, eps)
         Returns the derivative of alpha with respect to x^i
@@ -97,7 +97,7 @@ class Metric:
     def betai(self, _):
         raise NotImplementedError
 
-    def gamma(self, x, u, phot):
+    def gamma(self, x, u):
         """
         Computes the Lorentz factor
 
@@ -115,7 +115,6 @@ class Metric:
         """
         return np.sqrt(
             1
-            - int(phot)
             + np.einsum("ni,ni->n", np.einsum("nij,ni->nj", self.hij(x), u), u)
         )
 

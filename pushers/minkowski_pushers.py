@@ -203,6 +203,11 @@ class Drag:
                 gamma_new = 1 / np.sqrt(1 - np.linalg.norm(v_new) ** 2)
                 u_new = v_new * gamma_new
                 return u_new
+            
+        # if self.process == "pg":
+        #     xi = 0.2
+        #     u_b = self.args.get("u_bg")
+        
         else:
             raise NotImplementedError("Only pp interactions are implemented")
 
@@ -463,7 +468,7 @@ def IntegrateTrajectory(
     E_func: Callable[[np.ndarray], np.ndarray] = lambda _: np.array([0, 0, 0]),
     B_func: Callable[[np.ndarray], np.ndarray] = lambda _: np.array([0, 0, 0]),
     drags: Dict[str, Dict[str, float | np.ndarray[float]]] = None,
-    use_hybrid: bool = False,
+    pusher_type: str = "boris",
     gca_params: Dict[str, float] = {},
     progressbar=lambda _: _,
 ) -> Tuple[np.ndarray[float], np.ndarray[float], np.ndarray[float]]:
@@ -508,12 +513,14 @@ def IntegrateTrajectory(
     """
 
     nsteps = int(tmax / dt)
-
     pusher_boris = Boris()
-    if use_hybrid:
+    if pusher_type == "gca":
+        pusher_gca = GCA(**gca_params)
+    if pusher_type == "hybrid":
         E_ovr_B_max = gca_params.pop("E_ovr_B_max", 0.9)
         larmor_max = gca_params.pop("larmor_max", 0.1)
         pusher_gca = GCA(**gca_params)
+        pusher = ["Boris"]
 
     pusher_drags = []
     if drags is not None:
@@ -524,15 +531,14 @@ def IntegrateTrajectory(
     t = 0
     times = [t]
     xs = [x]
-    us = [u]
-
-    if use_hybrid:
-        pusher = ["Boris"]
+    us = [u]        
 
     for it in progressbar(range(nsteps)):
         E, B = E_func(x), B_func(x)
         use_gca = False
-        if use_hybrid:
+        if pusher_type == "gca":
+            use_gca = True
+        if pusher_type == "hybrid":
             rho = np.sum(np.cross(u, B) ** 2) ** 0.5 / np.dot(B, B)
             use_gca = (np.linalg.norm(E) / E_ovr_B_max < np.linalg.norm(B)) and (
                 rho < larmor_max
@@ -544,7 +550,7 @@ def IntegrateTrajectory(
             u_new = pusher_boris.update_u(u, E, B, dt)
 
         if np.any([np.isnan(ui) for ui in u_new]):
-            if use_hybrid:
+            if pusher_type == "hybrid":
                 print(
                     f"\nNaNs found in the U update @ t = {t:.2f} [{it} / {nsteps}]\n",
                     f"use_gca = {use_gca}; u = {u}; x = {x}; u_new = {u_new}; x_new = {x_new}",
@@ -568,7 +574,7 @@ def IntegrateTrajectory(
             x_new = pusher_boris.update_x(x, u_new, dt)
 
         if np.any([np.isnan(ui) for ui in u_new]):
-            if use_hybrid:
+            if pusher_type == "hybrid":
                 print(
                     f"\nNaNs found in the X update @ t = {t:.2f} [{it} / {nsteps}]\n",
                     f"use_gca = {use_gca}; u = {u}; x = {x}; u_new = {u_new}; x_new = {x_new}",
@@ -582,9 +588,9 @@ def IntegrateTrajectory(
         times.append(t)
         xs.append(x)
         us.append(u)
-        if use_hybrid:
+        if pusher_type == "hybrid":
             pusher.append("Boris" if not use_gca else "GCA")
-    if use_hybrid:
+    if pusher_type == "hybrid":
         return (
             np.array(times),
             np.array(xs),
